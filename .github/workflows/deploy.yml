@@ -1,0 +1,94 @@
+name: Deploy Travel Agent
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-travel-agent
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_REGION: us-central1
+  SERVICE_NAME: travel-agent
+  AR_REPO: travel-agent
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
+
+      - name: Build and push image
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+        run: |
+          IMAGE_BASE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${AR_REPO}/${SERVICE_NAME}"
+          SHORT_SHA=$(echo "${GITHUB_SHA}" | cut -c1-7)
+          IMAGE_TAG="${IMAGE_BASE}:${SHORT_SHA}"
+          IMAGE_LATEST="${IMAGE_BASE}:latest"
+
+          docker build -t "${IMAGE_TAG}" -t "${IMAGE_LATEST}" .
+          docker push "${IMAGE_TAG}"
+          docker push "${IMAGE_LATEST}"
+
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "${GITHUB_ENV}"
+
+      - name: Get current service URL
+        id: service_url
+        run: |
+          URL=$(gcloud run services describe "${SERVICE_NAME}" \
+            --region="${GCP_REGION}" \
+            --format='value(status.url)' 2>/dev/null || echo "")
+          echo "url=${URL}" >> "${GITHUB_OUTPUT}"
+
+      - name: Deploy to Cloud Run
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.SERVICE_NAME }}
+          image: ${{ env.IMAGE_TAG }}
+          region: ${{ env.GCP_REGION }}
+          env_vars: |
+            AGENT_URL=${{ steps.service_url.outputs.url }}
+            LLM_MODEL=${{ secrets.LLM_MODEL }}
+
+      - name: Health check
+        env:
+          SERVICE_URL: ${{ steps.service_url.outputs.url }}
+        run: |
+          if [ -n "${SERVICE_URL}" ]; then
+            echo "Checking health at ${SERVICE_URL}/.well-known/agent-card.json"
+            for i in $(seq 1 10); do
+              if curl -sf "${SERVICE_URL}/.well-known/agent-card.json" > /dev/null 2>&1; then
+                echo "Health check passed!"
+                exit 0
+              fi
+              echo "Attempt ${i}/10 failed, waiting 10s..."
+              sleep 10
+            done
+            echo "Health check failed after 10 attempts"
+            exit 1
+          else
+            echo "First deploy — no URL available yet for health check. Skipping."
+          fi
