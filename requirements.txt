@@ -1,1 +1,1 @@
-crewai[a2a]>=1.9.3,<2.0
+crewai[a2a,litellm]>=1.9.3,<2.0
