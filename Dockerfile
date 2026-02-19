@@ -8,6 +8,7 @@ RUN groupadd -r agent && useradd -r -g agent -d /app -s /sbin/nologin agent
 WORKDIR /app
 COPY --from=builder /install /usr/local
 COPY --chown=agent:agent travel_agent.py .
+RUN mkdir -p /app/.local && chown -R agent:agent /app/.local
 USER agent
 ENV PORT=8080 PYTHONUNBUFFERED=1
 EXPOSE 8080
